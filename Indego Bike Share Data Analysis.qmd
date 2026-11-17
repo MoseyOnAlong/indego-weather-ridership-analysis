@@ -1,0 +1,954 @@
+---
+title: "Indego Bike Share Data Analysis"
+author: "Zachary Moser"
+date: "`r Sys.Date()`"
+format: 
+  html:
+    self-contained: true
+    toc: true
+    toc_float: true
+    number_section: false
+    highlight: "tango"
+    theme: "cosmo"
+    code-fold: true
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(tidyverse)
+library(lubridate)
+library(scales)
+```
+
+# 1. Summary
+
+This study asks how extreme weather days affect Indego ridership, and whether the effects differ by passholder type, bike type, and proximity (within one mile) to Temple University Station or City Hall South. The gaps help Indego’s operations team target efforts to reduce losses.
+
+Using 2024 and 2025 Indego and NOAA data, I flag a day as extreme if its average temperature (mean of daily max and min) is in the top or bottom 5% of days, precipitation or wind is in the top 5% (about 0.64 inches or 16 mph), or any snow fell. Extreme days are compared with normal days from the same season, since season is confounded with total ridership.
+
+Extreme weather was associated with a cut in ridership in every season. Snow and cold hurt most, then heavy precipitation, wind, and heat. Casual riders dropped more than members, standard bikes dropped more than electric bikes in every weather type, and stations near Temple fell most while those near City Hall South fell least. The largest gap was between casual and member riders on cold and snow days, so I recommend targeting casual riders with cold weather incentives.
+
+# 2. Question, Audience, and Prediction
+
+## 2.1 Question:
+
+How do extreme weather days affect Indego ridership, and do the effects differ by passholder type, bike type (standard vs. electric), and station proximity to Temple University Station or City Hall South?
+
+## 2.2 Audience:
+
+Indego’s operations team. Differences between groups give them a starting point for further research into why gaps exist and how to reduce ridership losses on extreme days.
+
+## 2.3 Predictions:
+
+1.  **Weather ranking:** Precipitation (snow then rain) reduces ridership the most, followed by extreme heat, then extreme cold, then wind. Heat ranks above cold because of heat illness risk.
+
+2.  **Passholder type:** Casual riders (day pass and walk-up) drop off more than members (Indego30 and Indego365) on extreme days.
+
+3.  **Bike type:** In heat, cold, and wind, standard bikes see larger percentage drops than electric bikes because electric bikes require less effort. In precipitation, the pattern reverses, with electric bikes dropping more because of their electronics.
+
+4.  **Proximity:** Stations within one mile of Temple (Temple University Station as reference) or Center City (City Hall South as reference) see smaller drops than other stations, since riders there have a stronger need for short-distance transportation.
+
+# 3. Data and Key Choices
+
+**Sources, window, and unit of observation.**
+
+I used three data sources. The first is the Indego trip data, which is published as one CSV per quarter. Each row is a single trip, with start and end time and station, duration, bike type, pass type, and other fields. I used eight consecutive quarters covering 2024 and 2025, which came to 2,627,563 trips. After filtering the data (see 3.3.2 for more details), the final count excluded about 8.1% of the data, giving us 2,413,947 trips to analyze.
+
+The second source is the Indego station table, a CSV of 386 stations with station ID, name, go-live date, and current status (snapshot dated 2026-10-15). I used the go-live date to keep only stations that went live prior to January 1, 2024, so that all stations were active for the full two-year window.
+
+The third source is NOAA daily weather from Philadelphia International Airport (station USW00013739), which I read directly by URL as a CSV. It provides daily maximum and minimum temperature (°F), precipitation and snowfall (inches), and average wind speed (mph), and I limited it to the same two years (731 daily records).
+
+I chose 2024 and 2025 because two full years cover every season twice, and that is enough days to compare weather conditions without pulling in the COVID-era distortions in earlier data.
+
+The unit of observation is one day, by pass type, bike type, and station group (near City Hall South vs. near Temple University Station). I aggregated trips to daily counts and joined them to that day’s weather, since the weather data is only available at the daily level.
+
+**Key audit findings (details in A.1)** Quarterly trip counts follow a plausible seasonal pattern, with more trips in warmer months, and rise from 2024 to 2025 in three of four quarters. Seventy stations in the station table never appear in the trip data, with 41 going live after the data window, 28 being inactive, and one (Municipal Services Building Plaza) appears to have been closed for renovation during the observation period. Station IDs are unique but station names are not, so I joined on ID. Trip durations are capped at 24 hours, and the 1,325 retained trips at the cap were kept because duration is not analyzed. The 36,139 retained trips with missing end coordinates were also kept, since the analysis uses only trip starts. I removed trips from virtual station 3000 (132 trips), which has no coordinates, trips with an uninterpretable pass type (1,191 ‘NULL’ and 5 ‘IndegoFlex’), trips with missing start coordinates, and trips from stations not live before 2024, for 213,616 removals in total (8.1% of raw trips). The weather file has exactly 731 daily rows with no missing, duplicated, or out-of-range dates.
+
+**Exclusions, definitions, and denominators.**
+
+**Definitions**
+
+- **Extreme weather day:** A day meeting at least one of these: average temperature (average of max and min temp) in the top or bottom 5%, precipitation in the top 5%, any snowfall, or average wind speed in the top 5%. All other days are normal days.
+
+- **Daily ridership:** The count of trips starting on a given day, within a given group.
+
+- **Rider Type:** Casual riders are those with a walk-up or day pass, while member riders are those with an Indego30 or Indego365 pass.
+
+- **Proximity:** A station is “near” if it is within one mile of Temple University Station (TUS) or City Hall South (CHS). All other stations are “None.”
+
+- **Groups compared:** Passholder type (transformed to casual vs member), bike type, and proximity.
+
+**Exclusions**
+
+- **Station 3000:** A virtual/staff station with no coordinates, so its trips can’t be assigned to a proximity group.
+
+- **Passholder type “NULL”:** Uninterpretable, so it can’t be assigned to a rider group.
+
+- **Passholder type “IndegoFlex”:** With only 5 rows and it being difficult to directly assign to casual or member, this has been removed from the dataset.
+
+- **Missing start coordinates:** These trips can’t be assigned a proximity group and would be misclassified in the pipeline when trying to determine proximity to stations.
+
+- **Stations not live before 1/1/2024:** Only stations active for the full 2024-2025 window are kept, so counts are comparable across both years.
+
+- **Not excluded:** Trips with extremely long duration. They are still reported trips, and since duration was not a variable in this analysis, the possibly inaccurate values did not need to be removed.
+
+**Comparisons**
+
+For each group, I measure the change in ridership during each type of extreme weather. For every extreme day, I compare that day’s trip count with the average trip count on normal days in the same season for the same group. I then sum across all extreme days of that weather type and express the result as a percent change.
+
+## 3.1 Load Data
+
+```{r, message=FALSE}
+#Load data
+trip_raw_q1 <- read_csv("Data/indego-trips-2024-q1.csv")
+trip_raw_q2 <- read_csv("Data/indego-trips-2024-q2.csv")
+trip_raw_q3 <- read_csv("Data/indego-trips-2024-q3.csv")
+trip_raw_q4 <- read_csv("Data/indego-trips-2024-q4.csv")
+trip_raw_q5 <- read_csv("Data/indego-trips-2025-q1.csv")
+trip_raw_q6 <- read_csv("Data/indego-trips-2025-q2.csv")
+trip_raw_q7 <- read_csv("Data/indego-trips-2025-q3.csv")
+trip_raw_q8 <- read_csv("Data/indego-trips-2025-q4.csv")
+
+station_raw <- read_csv("Data/indego-stations-2026-10-15.csv")
+```
+
+```{r, message=FALSE}
+weather_file <- "Data/weather_2024_2025_raw.csv"
+
+# Check if the weather file already exists. If it does, read it in. If not, download it from NOAA and save it for future use.
+
+if (file.exists(weather_file)) {
+  weather_raw <- read_csv(weather_file)
+} else {
+  noaa_url <- paste0(
+    "https://www.ncei.noaa.gov/access/services/data/v1?",
+    "dataset=daily-summaries&stations=USW00013739",
+    "&startDate=2024-01-01&endDate=2025-12-31",
+    "&dataTypes=TMAX,TMIN,PRCP,SNOW,AWND",
+    "&units=standard&includeStationName=true&format=csv"
+  )
+
+  weather_raw <- read_csv(noaa_url)
+
+  write_csv(weather_raw, weather_file)
+}
+```
+
+## 3.2 Clean Data
+
+### 3.2.1 Clean Trips
+
+```{r}
+#| output: false
+
+trips_raw <- bind_rows(
+  trip_raw_q1,
+  trip_raw_q2,
+  trip_raw_q3,
+  trip_raw_q4,
+  trip_raw_q5,
+  trip_raw_q6,
+  trip_raw_q7,
+  trip_raw_q8,
+  .id = "quarter"
+) 
+
+sapply(trips_raw, class)
+# Based on this, only the start and end dates appear to require mutation for the join
+
+trips_raw <- trips_raw |> 
+  mutate(
+    start_time = mdy_hm(start_time, tz = "UTC"),
+    end_time   = mdy_hm(end_time,   tz = "UTC")
+  )
+```
+
+Quick check to confirm trips did not create NA values when converting:
+
+```{r}
+sum(is.na(trips_raw$start_time))
+sum(is.na(trips_raw$end_time))
+```
+
+### 3.2.2 Clean Station
+
+```{r}
+#| output: false
+
+station_clean <- na.omit(station_raw) |> #station raw had multiple rows with exclusively NA values
+  mutate(
+    go_live_date = mdy(`Day of Go_live_date`),
+    Status = factor(Status, levels = c("Active", "Inactive"))
+  ) |>
+  select(-`Day of Go_live_date`) # Change difficult to work with name
+
+glimpse(station_clean)
+# Station_ID   <dbl>
+# Station_Name <chr>
+# Status       <fct>
+# go_live_date <date>
+```
+
+### 3.2.3 Clean Weather
+
+```{r}
+#| output: false
+
+glimpse(weather_raw)
+# all data loaded as expected
+
+weather <- weather_raw |>
+  mutate(
+    tmean = (TMAX + TMIN) / 2,
+    # seasonal flags based on well defined season change dates
+    season = case_when(
+      DATE >= make_date(year(DATE), 12, 21) | DATE < make_date(year(DATE), 3, 20) ~ "Winter",
+      DATE <  make_date(year(DATE), 6, 21) ~ "Spring",
+      DATE <  make_date(year(DATE), 9, 22) ~ "Summer",
+      TRUE ~ "Fall"
+    ),
+    cold        = tmean <= quantile(tmean, 0.05),
+    hot         = tmean >= quantile(tmean, 0.95),
+    wind        = AWND  >= quantile(AWND,  0.95),
+    precip      = PRCP >= quantile(PRCP, 0.95),
+    snow        = SNOW > 0,
+    extreme_any = precip | snow | wind | cold | hot
+    # flags true if any of the dates are true, false if not
+  )
+```
+
+### 3.2.4 Weather Cutoff Review
+
+```{r}
+# Extreme-weather cutoffs, pooled across the whole window
+weather |>
+  summarise(
+    cold_cutoff   = quantile(tmean, 0.05),   # degrees F
+    hot_cutoff    = quantile(tmean, 0.95),   # degrees F
+    wind_cutoff   = quantile(AWND,  0.95),   # mph
+    precip_cutoff = quantile(PRCP,  0.95)    # inches
+  )
+```
+
+The percentile cutoffs are about 29.8 F (cold), 83.2 F (hot), 16.3 mph (wind), and 0.64 in (precipitation), which are plausible extremes for Philadelphia.
+
+```{r}
+weather |>
+  summarise(
+    days = n(),
+    cold = sum(cold),
+    hot = sum(hot),
+    precip = sum(precip),
+    snow = sum(snow),
+    wind = sum(wind),
+    extreme = sum(extreme_any),
+    .by = season
+  ) |>
+  bind_rows(
+    weather |>
+      summarise(
+        season = "All",
+        days = n(),
+        cold = sum(cold),
+        hot = sum(hot),
+        precip = sum(precip),
+        snow = sum(snow),
+        wind = sum(wind),
+        extreme = sum(extreme_any)
+      )
+  )
+```
+
+Each percentile flag covers approximately 37 days, with snow lower at 18, which is still enough to compare. The season split shows that season is tied to the weather flags. It follows that hot days fall entirely in summer, cold days in winter and fall, and snow days pretty much only in winter. The analysis therefore compares each extreme day with normal days from the same season where at least five extreme days of that type occurred, so that the baseline is seasonally appropriate.
+
+## 3.3 Create Final Data Frame
+
+### 3.3.1 Join Data Frames
+
+```{r}
+trips <- trips_raw |>
+  mutate(trip_date = as.Date(start_time, tz = "UTC")) |>
+  left_join(
+    station_clean |> select(Station_ID, Station_Name),
+    by = c("start_station" = "Station_ID")
+  ) |>
+  rename(start_station_name = Station_Name) |>
+  left_join(
+    station_clean |> select(Station_ID, Station_Name),
+    by = c("end_station" = "Station_ID")
+  ) |>
+  rename(end_station_name = Station_Name) |>
+  left_join(weather, by = c("trip_date" = "DATE")) |>
+  mutate(
+# near_tus: TRUE if the trip starts within 1 mile of station 3008 (TUS).
+# start_lat[start_station == 3008][1] grabs the reference station's latitude (first match).
+# Lat/lon differences are converted to miles (69 mi per degree of latitude,
+# 53 mi per degree of longitude at Philadelphia's latitude), then combined
+# with the Pythagorean formula for straight-line distance.
+    near_tus = sqrt(((start_lat - start_lat[start_station == 3008][1]) * 69)^2 +
+                    ((start_lon - start_lon[start_station == 3008][1]) * 53)^2) <= 1,
+
+# near_chs: same calculation as near_tus with station 3318 (CHS) as reference instead
+    near_chs = sqrt(((start_lat - start_lat[start_station == 3318][1]) * 69)^2 +
+                    ((start_lon - start_lon[start_station == 3318][1]) * 53)^2) <= 1,
+
+# area_start: labels each trip by which area(s) its start point falls in.
+# "Both" is checked first so overlapping trips are not mislabeled as one area.
+    area_start = case_when(
+      near_tus & near_chs ~ "Both", # should be empty
+      near_tus ~ "TUS",
+      near_chs ~ "CHS",
+      TRUE ~ "None"
+    )
+  )
+```
+
+### 3.3.2 Remove Particular Trips
+
+```{r}
+trips <- trips |>
+  filter(
+    start_station != 3000,  # no coordinates
+    !passholder_type %in% c("NULL", "IndegoFlex"), # "NULL" is uninterpretable, IndegoFlex has only 5 rows (can't support a facet)
+    !is.na(start_lat), !is.na(start_lon), # no coords means no TUS/CHS proximity assignment, would fall into "None" by mistake
+    start_station %in% station_clean$Station_ID[
+      as.Date(station_clean$go_live_date) < as.Date("2024-01-01")  # keep stations that were live only for the full window
+    ]
+  )
+
+nrow(trips_raw) - nrow(trips)
+(nrow(trips_raw) - nrow(trips)) / nrow(trips_raw) #8% of data removed
+```
+
+# 4. Findings
+
+## 4.1 Extreme vs non extreme, by season
+
+```{r}
+#| label: fig-season
+#| fig-cap: "Daily trips on normal and extreme weather days by season, 2024 to 2025. Boxes show the middle 50% of days, the line is the median, and the white dot is the mean."
+trips |>
+  count(trip_date, season, extreme_any) |>
+  mutate(
+    season = factor(season, levels = c("Winter", "Spring", "Summer", "Fall")),
+    weather = factor(extreme_any,
+                     levels = c(FALSE, TRUE),
+                     labels = c("Normal", "Extreme"))
+  ) |>
+  ggplot(aes(weather, n, fill = weather)) +
+  geom_boxplot() +
+  stat_summary(fun = mean, geom = "point", shape = 21, fill = "white") +
+  facet_wrap(~ season, nrow = 1) +
+  scale_fill_manual(values = c(Normal = "#0072B2", Extreme = "#E69F00")) +
+  labs(title = "Daily trips by extreme weather and season",
+       x = NULL,
+       y = "Trip Count") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.border = element_rect(color = "gray60", fill = NA, linewidth = 0.5), #creates a border around the facet wrap
+    axis.text.x = element_text(face = "bold"), #bolds the x axis text
+    strip.text = element_text(face = "bold")  #bolds the facet wrap text
+  )
+```
+
+**Key Takeaways:** Extreme weather lowered average daily trips in every season, from about 14% in summer to about 40% in fall, so comparisons need to hold season fixed.
+
+## 4.2. Each weather type vs non extreme days, matched on season
+
+```{r}
+#| label: fig-type
+#| fig-cap: "Daily trips on extreme versus normal days for each weather type. Each baseline uses only the seasons in which that weather occurred at least five times, so baselines differ across panels."
+trips |>
+  count(trip_date, season, extreme_any, cold, hot, precip, snow, wind) |>
+  pivot_longer(c(cold, hot, precip, snow, wind),
+               names_to = "type", values_to = "extreme") |>
+  filter(extreme | !extreme_any) |>
+  # keep a season for a given type only if that type has at least 5 days of that weather type
+  filter(sum(extreme) >= 5, .by = c(type, season)) |>
+  mutate(
+    type = factor(type,
+                  levels = c("hot", "wind", "precip", "cold", "snow"),
+                  labels = c("Hot",
+                             "Wind",
+                             "Heavy Precip",
+                             "Cold",
+                             "Snow")),
+    condition = factor(extreme,
+                       levels = c(FALSE, TRUE),
+                       labels = c("Normal", "Extreme"))
+  ) |>
+  ggplot(aes(condition, n, fill = condition)) +
+  geom_boxplot() +
+  stat_summary(fun = mean, geom = "point", shape = 21, fill = "white") +
+  facet_wrap(~ type, nrow = 1) +
+  scale_fill_manual(values = c(Normal = "#0072B2", Extreme = "#E69F00")) +
+  labs(title = "Daily trips: Extreme vs Non Extreme Days",
+       subtitle = "Baseline is non extreme days from the same seasons",
+       x = NULL, y = "Trips per day") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.border = element_rect(color = "gray60", fill = NA, linewidth = 0.5),
+    axis.text.x = element_text(face = "bold"),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+**Key Takeaways:** Cold and snow cut average daily trips by roughly half, heavy precipitation and wind by about a third, and heat by about a tenth, so the severity of an extreme day depends heavily on the type of weather.
+
+## 4.3 Pass type
+
+```{r}
+#| label: fig-pass
+#| fig-cap: "Percent change in daily trips on extreme weather days relative to normal days in the same season, for casual riders (day pass, walk-up) and members (Indego30, Indego365)."
+trips |>
+  mutate(rider_type = if_else(passholder_type %in% c("Day Pass", "Walk-up"),
+                              "Casual", "Member")) |>
+  count(trip_date, rider_type) |>
+  # Count will ignore instances where it counts 0, so fill in remaining list with 0s for completeness
+  complete(trip_date = full_seq(trip_date, 1), rider_type, fill = list(n = 0)) |>
+  left_join(
+    weather |> select(trip_date = DATE, season, extreme_any, cold, hot, precip, snow, wind),
+    by = "trip_date"
+  ) |>
+# Calculates the average value of n for non-extreme observations, separately for each rider type and season, and stores that average in a new column called base.
+  mutate(base = mean(n[!extreme_any]), .by = c(rider_type, season)) |>
+  pivot_longer(c(cold, hot, precip, snow, wind), names_to = "type", values_to = "extreme") |>
+  filter(extreme) |>
+# Ridership changes during each type of extreme weather compared with the base, calculated separately for rider types
+  summarise(pct = sum(n) / sum(base) - 1, days = n(), .by = c(rider_type, type)) |>
+  filter(days >= 5) |>
+  mutate(type = factor(type,
+                       levels = c("hot", "wind", "precip", "cold", "snow"),
+                       labels = c("Hot", "Wind", "Heavy precip", "Cold", "Snow"))) |>
+  ggplot(aes(type, pct, fill = rider_type)) +
+  geom_col(position = position_dodge()) +
+  geom_hline(yintercept = 0) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c(Casual = "#0072B2", Member = "#E69F00")) +
+  labs(title = "Weather effect by rider type",
+       subtitle = "Change in daily trips vs non extreme days in the same season",
+       x = NULL, y = "% change in trips", fill = "Rider type") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(face = "bold"))
+```
+
+**Key Takeaways:** Casual riders dropped 17 to 33 percentage points more than members in every weather type (for example, about -77% vs -44% on cold days), the largest gap between any groups I compared.
+
+## 4.4 Bike type
+
+```{r}
+#| label: fig-bike
+#| fig-cap: "Percent change in daily trips on extreme weather days relative to normal days in the same season, for standard and electric bikes."
+trips |>
+  count(trip_date, bike_type) |>
+# Count will ignore instances where it counts 0, so fill in remaining list with 0s for completeness
+  complete(trip_date = full_seq(trip_date, 1), bike_type, fill = list(n = 0)) |>
+  left_join(
+    weather |> select(trip_date = DATE, season, extreme_any, cold, hot, precip, snow, wind),
+    by = "trip_date"
+  ) |>
+  mutate(base = mean(n[!extreme_any]), .by = c(bike_type, season)) |>
+  pivot_longer(c(cold, hot, precip, snow, wind), names_to = "type", values_to = "extreme") |>
+  filter(extreme) |>
+  summarise(pct = sum(n) / sum(base) - 1, days = n(), .by = c(bike_type, type)) |>
+  filter(days >= 5) |>
+  mutate(type = factor(type,
+                       levels = c("hot", "wind", "precip", "cold", "snow" ),
+                       labels = c("Hot", "Wind", "Heavy precip", "Cold", "Snow"))) |>
+  ggplot(aes(type, pct, fill = bike_type)) +
+  geom_col(position = position_dodge()) +
+  geom_hline(yintercept = 0) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c(electric = "#0072B2", standard = "#E69F00")) +
+  labs(title = "Weather effect by bike type",
+       subtitle = "Change in daily trips vs non extreme days in the same season",
+       x = NULL, y = "% change in trips", fill = "Bike type") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(face = "bold"))
+```
+
+**Key Takeaways:** Standard bikes dropped 6 to 10 percentage points more than electric bikes in every weather type, including heavy precipitation, so electric bikes were somewhat more weather resistant.
+
+## 4.5 Area
+
+```{r}
+#| label: fig-area
+#| fig-cap: "Percent change in daily trips on extreme weather days relative to normal days in the same season, for stations within one mile of City Hall South (CHS), within one mile of Temple University Station (TUS), or neither."
+trips |>
+  count(trip_date, area_start) |>
+# Count will ignore instances where it counts 0, so fill in remaining list with 0s for completeness
+  complete(trip_date = full_seq(trip_date, 1), area_start, fill = list(n = 0)) |>
+  left_join(
+    weather |> select(trip_date = DATE, season, extreme_any, cold, hot, precip, snow, wind),
+    by = "trip_date"
+  ) |>
+  mutate(base = mean(n[!extreme_any]), .by = c(area_start, season)) |>
+  pivot_longer(c(cold, hot, precip, snow, wind), names_to = "type", values_to = "extreme") |>
+  filter(extreme) |>
+  summarise(pct = sum(n) / sum(base) - 1, days = n(), .by = c(area_start, type)) |>
+  filter(days >= 5) |>
+  mutate(type = factor(type,
+                       levels = c("hot",  "wind", "precip", "cold", "snow"),
+                       labels = c("Hot", "Wind", "Heavy precip", "Cold", "Snow"))) |>
+  ggplot(aes(type, pct, fill = area_start)) +
+  geom_col(position = position_dodge()) +
+  geom_hline(yintercept = 0) +
+  scale_y_continuous(labels = percent) +
+  scale_fill_manual(values = c(None = "#0072B2", CHS = "#E69F00", TUS = "#009E73")) +
+  labs(title = "Weather effect by area",
+       subtitle = "Change in daily trips vs non extreme days in the same season",
+       x = NULL,
+       y = "% change in trips",
+       fill = "Start area") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(face = "bold"))
+```
+
+**Key Takeaways:** Stations near City Hall South dropped least and stations near Temple dropped most in every weather type, but the spread is only about 5 to 10 points, the smallest gap of the three groupings.
+
+# 5. Implications and Limitations
+
+Extreme weather reduced ridership for every group. Snow and cold had the largest effects (roughly half of daily trips), followed by heavy precipitation and wind, then heat. That ordering held across pass types, bike types, and areas, so the groups differ in how much they drop, not in what weather type matters most.
+
+Pass type shows the largest gap, with casual riders falling 17 to 33 points more than members. Standard bikes fell 6 to 10 points more than electric bikes, and Temple-area stations 5 to 10 points more than City Hall South stations. Casual riders on cold and snow days are therefore the clearest target for follow-up research. As this is only an observational study, I cannot say why these gaps exist.
+
+Against my predictions, I was right that casual riders would drop most and that standard bikes would drop more than electric bikes in heat, cold, and wind. I was wrong that heat would rank second, that rain would matter most, that electric bikes would drop more in precipitation, and that Temple and Center City would be cushioned (only City Hall South was).
+
+These results come from two years of daily counts and one airport weather station, so they may not generalize to other years or places. Our generalizations can only be made within the context of this specific dataset and time period. Temperature cutoffs are pooled across all 731 days, so hot days fall in summer and cold days in winter and fall. I created season matched baselines in an attempt to reduce the seasonal differences in biking, but it may still have affected the overall data due to confounding variables. Indego makes note that they removed trips that were less than a minute long on their website, but we continued to include any and all trips which were logged. As a result, we are absolutely missing data that may have been imperative to properly creating this design. Weather flags also overlap (some of the coldest days are snow days) but were not separated in this study. There was no control for day of week, holidays, special events, or changes to the bike share system, which may have also influenced numbers. Finally, as this is only an observational study, we are unable to make causal claims about the effects of weather on ridership.
+
+# 6. References
+
+Indego. (n.d.-a). *Indego trip data, quarterly files, 2024-2025* \[Data set\]. Bicycle Transit Systems / City of Philadelphia. <https://www.rideindego.com/about/data/> (accessed October 20, 2026).
+
+- 2024 Q1: <https://www.rideindego.com/wp-content/uploads/2024/04/indego-trips-2024-q1.zip>
+
+- 2024 Q2: <https://www.rideindego.com/wp-content/uploads/2024/07/indego-trips-2024-q2.zip>
+
+- 2024 Q3: <https://www.rideindego.com/wp-content/uploads/2024/10/indego-trips-2024-q3.zip>
+
+- 2024 Q4: <https://www.rideindego.com/wp-content/uploads/2025/01/indego-trips-2024-q4.zip>
+
+- 2025 Q1: <https://www.rideindego.com/wp-content/uploads/2025/04/indego-trips-2025-q1.zip>
+
+- 2025 Q2: <https://www.rideindego.com/wp-content/uploads/2025/07/indego-trips-2025-q2.zip>
+
+- 2025 Q3: <https://www.rideindego.com/wp-content/uploads/2025/10/indego-trips-2025-q3.zip>
+
+- 2025 Q4: <https://www.rideindego.com/wp-content/uploads/2026/01/indego-trips-2025-q4.zip>
+
+Indego. (n.d.-b). *Indego station table* \[Data set\]. Bicycle Transit Systems / City of Philadelphia. <https://www.rideindego.com/wp-content/uploads/2026/10/indego-stations-2026-10-15.csv> (accessed October 20, 2026).
+
+National Oceanic and Atmospheric Administration, National Centers for Environmental Information. (n.d.). *Daily summaries, Philadelphia International Airport (station USW00013739), 2024-2025* \[Data set\]. [NCEI Data Service API](https://www.ncei.noaa.gov/access/services/data/v1?dataset=daily-summaries&stations=USW00013739&startDate=2024-01-01&endDate=2025-12-31&dataTypes=TMAX,TMIN,PRCP,SNOW,AWND&units=standard&includeStationName=true&format=csv) (accessed October 23, 2026).
+
+`r format(citation(), style = "text")`
+
+`r format(citation("tidyverse"), style = "text")`
+
+`r format(citation("lubridate"), style = "text")`
+
+`r format(citation("scales"), style = "text")`
+
+# Appendix A: Technical
+
+## A.1 Data audit
+
+### A.1.1 What does one row represent in each file? How many rows are in each quarter, and does that pattern look plausible?
+
+One row in the trip data represents a trip: start/end time and station, duration, bike type, pass type, and more.
+
+One row in the station data represents a single bike share station, containing information such as its ID, name, status, and go-live date.
+
+One row in the weather data represents a single day's weather observations between 2024 and 2025. It contains daily max/min temperature (°F), precipitation, snowfall (inches), and average wind speed (mph).
+
+```{r}
+trips_raw |>
+  count(year = year(start_time), quarter = paste0("Q", quarter(start_time))) |>
+  pivot_wider(names_from = year, values_from = n) |>
+  mutate(pct_change = round((`2025` - `2024`) / `2024` * 100, 2))
+```
+
+This distribution between the quarters and years looks plausible, with a slight increase in trips in the warmer months (Q2 and Q3) and a decrease in the colder months (Q1 and Q4). The number of trips also appears to be generally increasing from 2024 to 2025 (with the only slight decrease being Q2 between the two years), which could be due to a variety of factors, such as increased popularity of the bike share program, more stations being added, or changes in weather patterns.
+
+### A.1.2 Are column names and column types the same in every quarterly file? Show how you checked.
+
+The following code checks if all the names in the first quarterly file matches every other. If true, it will return true. If any are false, it will return false. If the first trip file matches all other trips, that implies that all of the following equal. The same logic is applied to the column types, which are checked using the sapply function to return the class of each column in each quarterly file.
+
+```{r}
+all(
+  identical(names(trip_raw_q1), names(trip_raw_q2)),
+  identical(names(trip_raw_q1), names(trip_raw_q3)),
+  identical(names(trip_raw_q1), names(trip_raw_q4)),
+  identical(names(trip_raw_q1), names(trip_raw_q5)),
+  identical(names(trip_raw_q1), names(trip_raw_q6)),
+  identical(names(trip_raw_q1), names(trip_raw_q7)),
+  identical(names(trip_raw_q1), names(trip_raw_q8))
+)
+
+all(
+  identical(sapply(trip_raw_q1, class), sapply(trip_raw_q2, class)),
+  identical(sapply(trip_raw_q1, class), sapply(trip_raw_q3, class)),
+  identical(sapply(trip_raw_q1, class), sapply(trip_raw_q4, class)),
+  identical(sapply(trip_raw_q1, class), sapply(trip_raw_q5, class)),
+  identical(sapply(trip_raw_q1, class), sapply(trip_raw_q6, class)),
+  identical(sapply(trip_raw_q1, class), sapply(trip_raw_q7, class)),
+  identical(sapply(trip_raw_q1, class), sapply(trip_raw_q8, class))
+)
+```
+
+As our final output is true for both column names and column types, we are able to safely join these rows together into one table without issue or any adjustments needed.
+
+### A.1.3 Do all station IDs in your trip data appear in the station table? Which do not, and what might explain that?
+
+```{r}
+trips_raw |>
+  distinct(start_station, end_station) |>
+  pivot_longer(everything(), values_to = "Station_ID") |>
+  distinct(Station_ID) |>
+  filter(!is.na(Station_ID)) |>
+  anti_join(station_clean, by = "Station_ID")
+```
+
+This shows that all station IDs in the trip data appear in the station table, so there are no missing stations. However, when we check the reverse, we find that there are 70 stations in the station table that do not appear in the trip data:
+
+```{r}
+station_clean |> 
+  filter(!Station_ID %in% na.omit(unique(c(trips_raw$start_station, trips_raw$end_station)))) |>
+  arrange(Station_Name) |>
+  select(Station_Name, go_live_date, Status)
+```
+
+This is likely due to either the station going live only after our observation period or going inactive before our data begins. The following tests this, while also accounting for those which are not in the data.
+
+```{r}
+station_clean |>
+  filter(!Station_ID %in% na.omit(unique(c(trips_raw$start_station, trips_raw$end_station)))) |>
+  mutate(reason = case_when(
+    go_live_date >= mdy("1-1-2026") ~ "A: live after data window",
+    Status != "Active"              ~ "B: inactive",
+    TRUE                            ~ "C: active, live before 2026, no trips"
+  )) |>
+  count(reason, sort = TRUE)
+```
+
+Per the above chart, there is only one observation that does not follow my hypothesis, so I need to find the name of this station and review what may have happened.
+
+```{r}
+station_clean |>
+  filter(!Station_ID %in% na.omit(unique(c(trips_raw$start_station, trips_raw$end_station)))) |>
+  filter(Status == "Active", go_live_date < mdy("1-1-2026")) |>
+  select(Station_Name, Station_ID, go_live_date, Status)
+```
+
+Municipal Services Building Plaza appears to have been shut down for renovations between May 2023 and April 2026, which explains why it is not included in the data.
+
+The above observations account for each of the stations not included in the dataset.
+
+### A.1.4 Is the station table one row per station ID? One row per station name? What does your answer imply about how you should join?
+
+```{r}
+station_clean |>
+  filter(n() > 1, .by = Station_ID) |>
+  arrange(Station_ID, go_live_date) |>
+  select(Station_Name, Station_ID, go_live_date, Status)
+
+station_clean |>
+  filter(n() > 1, .by = Station_Name) |>
+  arrange(Station_Name, go_live_date) |>
+  select(Station_Name, Station_ID, go_live_date, Status)
+```
+
+The station table has one row per station ID (the first check returns zero rows), but not one row per station name: 68 rows share a name with at least one other row under a different ID. In the examples shown, one ID is typically inactive and a newer ID with the same name is active, which suggests relocated or replaced stations. Therefore, joins should be done on station ID.
+
+### A.1.5 What does the distribution of trip duration look like? Which trips would you call implausible for your question, how many are there, and what will you do about them?
+
+```{r}
+summary(trips$duration)
+```
+
+1440 minutes is 24 hours, which aligns with the website stating that trips longer than 24 hours are truncated to 24 hours. We can see how much of our overall data includes values over this amount.
+
+```{r}
+trips |>
+  summarise(
+    n_over_1440 = sum(duration >= 1440, na.rm = TRUE),
+    pct_over_1440 = round(mean(duration >= 1440, na.rm = TRUE) * 100, 3)
+  )
+```
+
+While the duration of these trips are likely errors included in overall data for completeness, we are mostly focused on when a trip begins. We have no evidence that this is not a legitimate trip and since we are not using duration in our data, we do not need to remove or adjust these from the data at all.
+
+There is also a consideration about short round trips where someone began and stopped quickly, but as it still counts as a trip that began, it is still going to be factored into the data because it is activity recorded for a bike.
+
+### A.1.6 Which variables you plan to use have missing values? How many, and what will you do about them? Note anything else odd a careful analyst should know.
+
+```{r}
+trips_raw |> is.na() |> colSums()
+station_clean |> is.na() |> colSums()
+weather_raw |> is.na() |> colSums()
+trips |> is.na() |> colSums()
+```
+
+After filtering our data, the only empty values we have are in "end_lat" and "end_lon". We are not concerned with these variables in our dataset as we are concerned about a trip beginning at all, so these variables being NA don't need to be adjusted or removed.
+
+```{r}
+trips_raw |> count(passholder_type)
+trips_raw |> count(bike_type)
+```
+
+Biketype has no odd values, but passholder has "NULL" and "IndegoFlex". As null is impossible to classify and IndegoFlex doesn't have enough values to really factor in, all variables with these values will be removed.
+
+```{r}
+trips_raw |> 
+  filter(start_station == 3000) |>
+  count()
+```
+
+Lastly, the website states "A “Virtual Station” listed in the checkout and return kiosks, is used by staff to check in or check out a bike remotely for a special event or in a situation in which a bike could not otherwise be checked in or out to a station." Due to the issue of 3000 not having a start latitude and longitude, this would factor in as "not within a mile of our stations", so only the trips that start with the virtual station will be removed.
+
+### A.1.7 Does your weather data have exactly one row for each date in your window? If not, which dates are missing or duplicated?
+
+Between 2024 and 2025, there were 731 days (366 in 2024 due to leap year), so we expect to have 731 rows in our weather data.
+
+```{r}
+nrow(weather_raw)
+```
+
+You can also test this by creating a tibble with a sequence of dates from 1-1-24 to 12-31-25 and comparing dates with an anti_join to directly see which dates aren't included.
+
+```{r}
+exp_dates <- tibble(date = seq(as.Date("2024-01-01"), as.Date("2025-12-31"), by = "day"))
+exp_dates |> anti_join(weather_raw |> mutate(date = as.Date(DATE)), by = "date")
+```
+
+Lastly, we want to confirm that we didn't accidentally have any dates outside our expected range.
+
+```{r}
+weather_raw |> filter(!as.Date(DATE) %in% exp_dates$date)
+```
+
+## A.2 Join diagnostics
+
+```{r}
+# 1. Row counts before and after joining
+join1 <- trips_raw |>
+  left_join(station_clean |> select(Station_ID, Station_Name),
+            by = c("start_station" = "Station_ID"))
+join2 <- join1 |>
+  left_join(station_clean |> select(Station_ID, end_name = Station_Name),
+            by = c("end_station" = "Station_ID"))
+join3 <- join2 |>
+  mutate(trip_date = as.Date(start_time, tz = "UTC")) |>
+  left_join(weather, by = c("trip_date" = "DATE"))
+
+c(trips_raw = nrow(trips_raw),
+  start_join = nrow(join1),
+  end_join = nrow(join2),
+  weather_join = nrow(join3))
+
+# 2. Duplication checks
+station_clean |> count(Station_ID) |> filter(n > 1)
+weather |> count(DATE) |> filter(n > 1)
+
+# 3. Unmatched records
+c(weather_unmatched = sum(is.na(join3$STATION)),
+  start_unmatched = sum(is.na(join2$Station_Name)),
+  end_unmatched = sum(is.na(join2$end_name)))
+```
+
+## A.3 Checks
+
+### A.3.1 Workflow Check One:
+
+**Expected:** Each percentile-based flag (cold, hot, precip, wind) should mark about 36 or 37 of the 731 days (5% of 731 is 36.55). Snow is not percentile-based, so it has no target.
+
+```{r}
+#Found:
+weather |>
+  summarise(across(c(cold, hot, precip, wind), sum)) |>
+  pivot_longer(everything(), names_to = "flag", values_to = "days_total") |>
+  mutate(expected = 0.05 * nrow(weather),
+         diff = days_total - expected)
+
+weather |>
+  summarise(days_at_cutoff = sum(AWND == quantile(AWND, 0.95)))
+```
+
+**Changed?:** No. The wind flag keeps its tied days, so the wind category is slightly broader than the others (39 vs 37 days). This was noted as a limitation in the design.
+
+### A.3.2 Workflow Check Two:
+
+**Expected:** Trip dates should come from each trip's start time, so no trip is assigned to the wrong day. The trips should span exactly 731 distinct dates between 2024-01-01 and 2025-12-31, each quarter's dates should stay inside its own calendar quarter, every trip date should have a weather row, and trips that cross midnight should be assigned to their start date.
+
+```{r}
+#Found:
+
+# Trip dates should come from inside the range of dates only
+trips |>
+  summarise(min_date = min(trip_date), max_date = max(trip_date),
+            n_dates = n_distinct(trip_date))
+
+# Trip dates should be contained within their respective quarters
+trips |>
+  summarise(first = min(trip_date), last = max(trip_date),
+            n_dates = n_distinct(trip_date), .by = quarter)
+
+# Trip dates should match start times only
+trips |>
+  filter(trip_date != as_date(start_time)) |>
+  nrow()
+
+# Trip dates should never match end date, even if the trip crosses midnight
+trips |>
+  mutate(start_day = as_date(start_time), end_day = as_date(end_time)) |>
+  filter(end_day > start_day) |>
+  summarise(n_crossing = n(),
+            assigned_to_start = sum(trip_date == start_day),
+            assigned_to_end   = sum(trip_date == end_day))
+
+# All distinct trip dates should have a matching weather row, and all weather rows should have a matching trip date
+anti_join(distinct(trips, trip_date), weather, by = c("trip_date" = "DATE")) |> nrow()
+
+anti_join(weather, distinct(trips, trip_date), by = c("DATE" = "trip_date")) |> nrow()
+```
+
+**Changed?:** No. Date assignment, the join and the window are behaving as intended.
+
+### A.3.3 Verification Check:
+
+**Expected:** Independently calculating the casual rider percent change on cold days directly from raw trip rows. Results should reproduce the value shown in Figure 3 (about -77%).
+
+```{r}
+#Found:
+casual_types <- c("Day Pass", "Walk-up")
+
+cold_seasons <- weather |>
+  filter(cold) |>
+  count(season) |>
+  filter(n >= 5) |>
+  pull(season) # creates a vector of seasons with at least 5 cold day
+
+# filter trips to only those seasons and casual riders, then count the number of trips on cold days
+observed <- trips |>
+  semi_join(filter(weather, cold, season %in% cold_seasons), by = c("trip_date" = "DATE")) |>
+  filter(passholder_type %in% casual_types) |>
+  nrow()
+
+# calculate the expected number of trips on cold days by multiplying the number of cold days in each season by the average number of trips on non-extreme days in that season, then summing across seasons
+
+expected <- weather |>
+  filter(season %in% cold_seasons) |>
+  summarise(n_cold = sum(cold), n_normal = sum(!extreme_any), .by = season) |>
+  left_join(
+    trips |>
+      filter(passholder_type %in% casual_types, !extreme_any, season %in% cold_seasons) |>
+      count(season, name = "normal_trips"),
+    by = "season"
+  ) |>
+  summarise(expected = sum(n_cold * normal_trips / n_normal)) |>
+  pull(expected)
+
+c(observed = observed, expected = expected, pct_change = (observed - expected) / expected)
+```
+
+**Changed?:** No, the percent change of -0.768 approximately matches the value shown in Figure 3 (-0.77).
+
+# Appendix B: Process and Reflection
+
+## B.1 Process and analytical decisions, including one alternative you tried and whether it changed your findings
+
+My initial comparison ignored season, which produced a result which went against my initial intuition. The top 5% hottest days averaged about 500 more trips than the baseline. Upon further review, season was confounding the comparison. Hot days occur almost entirely in summer, when ridership is seasonally high, while cold and snow days fall almost entirely in winter, when ridership is low. Since the all year baseline mixes both, this drags the average of the overall daily trips down. I reran the analysis keeping a season for a given weather type only if it had at least 5 days of that weather type, and comparing flagged days only against non extreme days from those same seasons. Under this design, hot days averaged about 500 fewer trips than the baseline, reversing the original finding. The other four types (cold, snow, precip, wind) showed the same ordering under both approaches, since their flagged days already tended to fall in lower ridership months.
+
+```{r}
+#| label: fig-type-overall
+#| fig-cap: "Daily trips on extreme days for each weather type versus all normal days across 2024 and 2025, with no season matching. The normal-day baseline is identical in every panel."
+trips |>
+  count(trip_date, extreme_any, cold, hot, precip, snow, wind) |>
+  pivot_longer(c(cold, hot, precip, snow, wind),
+               names_to = "type", values_to = "extreme") |>
+  # keep this type's extreme days, plus every normal day (no flag of any kind)
+  filter(extreme | !extreme_any) |>
+  mutate(
+    type = factor(type,
+                  levels = c("hot", "wind", "precip", "cold", "snow"),
+                  labels = c("Hot", "Wind", "Heavy Precip", "Cold", "Snow")),
+    condition = factor(extreme,
+                       levels = c(FALSE, TRUE),
+                       labels = c("Normal", "Extreme"))
+  ) |>
+  ggplot(aes(condition, n, fill = condition)) +
+  geom_boxplot() +
+  stat_summary(fun = mean, geom = "point", shape = 21, fill = "white") +
+  facet_wrap(~ type, nrow = 1) +
+  scale_fill_manual(values = c(Normal = "#0072B2", Extreme = "#E69F00")) +
+  labs(title = "Daily trips: Extreme vs All Normal Days",
+       subtitle = "Baseline is all non extreme days, not matched on season",
+       x = NULL, y = "Trips per day") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    panel.border = element_rect(color = "gray60", fill = NA, linewidth = 0.5),
+    axis.text.x = element_text(face = "bold"),
+    strip.text = element_text(face = "bold")
+  )
+```
+
+## B.2 An approach you abandoned
+
+I initially planned to flag adverse weather using absolute thresholds drawn from some definitions online, using an average wind above 20 mph and precipitation of at least 0.1 in. Neither worked well with this data due to the totals of each group. Only `r sum(weather$AWND >= 20)` of `r nrow(weather)` days reached 20 mph, too few to estimate a stable effect, while the 0.1 in cutoff flagged `r sum(weather$PRCP >= 0.1)` days, so precipitation dominated any combined weather indicator and crowded out everything else.
+
+I replaced both with percentile cutoffs at the 5% tail (top 5% for precipitation and wind, both tails for mean temperature), computed over all `r nrow(weather)` days. This produced the flags that were used in the project. Snow is the exception because it occurs on few days, I kept a simple indicator (`SNOW > 0`) rather than a percentile rule as snow days generally tended to be more rare overall.
+
+I also wanted to create a loess curve with confidence intervals to visualize the trend of daily trips over time, but I found that the loess curve was not very informative due to the high variability in daily trips. Instead, I opted for boxplots and bar charts to summarize the data by season and weather type, which provided clearer insights into the effects of extreme weather on ridership. The original approach can be found in the below code.
+
+```{r}
+#| label: fig-loess
+#| fig-cap: "Daily trips on normal and extreme weather days, 2024 to 2025. Each point is one day, and the lines are loess smooths with 95% confidence bands."
+trips |>
+  count(trip_date, extreme_any) |>
+  mutate(
+    weather = factor(extreme_any,
+                     levels = c(FALSE, TRUE),
+                     labels = c("Normal", "Extreme"))
+  ) |>
+  ggplot(aes(trip_date, n, color = weather)) +
+  geom_point() +
+  geom_smooth(
+    method = "loess",
+    formula = y ~ x, #surpress warnings about formula not being used
+    se = TRUE) +
+  scale_color_manual(values = c(Normal = "#0072B2", Extreme = "#E69F00")) +
+  labs(title = "Daily trips, 2024-2025",
+       x = "Date",
+       y = "Trips",
+       color = "Weather Type") +
+  theme_minimal()
+```
+
+## B.3 Reflection (300–500 words)
+
+Easily the most surprising part of the project was how orderly the results were across the different groupings. I expected to see more variation in the ordering of the weather types, but snow and cold consistently had the largest effects, followed by heavy precipitation and wind, then heat. This suggests that the severity of an extreme day depends heavily on the type of weather, rather than the specific group being analyzed.
+
+On top of this, all groups followed the same patterns between the weather data and the ridership data, which was also unexpected. I had anticipated that some groups would be more sensitive to certain weather types than others, but the results showed that all groups were affected in a similar manner. This indicates that while the magnitude of the effect may differ between groups, the overall trend is consistent across all riders. My predictions missed in specific places: I expected heat to rank second, but it ranked last (about a 10% drop in daily trips), and I expected electric bikes to fall more in precipitation, when standard bikes fell more in every weather type.
+
+Overall the hardest data problem was the confounding effect of season on the hot days. I initially found that hot days averaged about 500 more trips than the baseline, which was counter intuitive. After further analysis, I realized that this was due to the fact that hot days occurred mostly in summer, when ridership is naturally higher, while cold and snow days occurred mostly in winter, when ridership is lower. Once I compared each extreme day only against normal days from the same season, hot days flipped to about 500 fewer trips than the baseline, and the verification check reproduced the casual cold-day figure (-0.768) from raw trip rows.
+
+Someone could reach a slightly different conclusion if they were to have removed the short round trips that were included with the data. While I don’t think this would have changed the overall findings, it could have affected the magnitude of the effects observed. For example, someone with a member pass is probably more likely to do a round trip since they’ve already paid for the month/year, while a casual rider may be more likely to do a one-way trip. This was not tested, but it could be an interesting avenue for future research.
+
+Overall, the most important skills from the course for this project were the ability to clean and manipulate data, as well as the ability to visualize and interpret results. The project required a lot of data cleaning and manipulation, which was made easier by the skills learned in the course. Additionally, the pipe statements allowed for a much cleaner and more readable workflow, which made it easier to understand the data and the results, which is easily the part I most undervalued when going into this project.
+
+## B.4 AI-use statement
+
+For this project, Claude Sonnet 5.5 was used primarily to help speed up the writing of the code and refining the language in the report. Claude did help with the initial brainstorming of potential directions I could take, but the final question of the project was formulated independently. For small gaps that would have been difficult or impossible without the use of techniques learned in class, Claude was able to find small snippets of code to fill these gaps. For example, the complete statements in figures 3, 4, and 5 were found with the assistance of Claude as count would not count days with 0 trips, which would have caused the percent change to be inaccurate. This was double checked in A.3.3 to also confirm the accuracy of the included complete statements. Additionally, Claude was used to help refine the language in the report, primarily by refining the language of the report to make it more concise, clear, and free of accidental contradictions. I would create an analysis and design and then double check the phrasing was proper. If specific examples were needed for the project, Claude would help identify them. I did not use Claude to generate any of the analysis or figures, and I verified all code and results produced by Claude to ensure they were correct and appropriate for the project. I also did not use Claude to generate any of the key takeaways or implications, as these were based on my own analysis and interpretation of the data.
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
